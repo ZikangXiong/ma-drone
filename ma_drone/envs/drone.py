@@ -3,12 +3,12 @@ from xml.etree import ElementTree
 import numpy as np
 import pybullet as p
 import pybullet_data
-from ma_drone.envs.base import WorldBase, RobotBase
 
 from ma_drone.config import ROBOT_ASSETS_PATH
+from ma_drone.envs.base import WorldBase, RobotBase
 
 
-class World(WorldBase):
+class DroneWorld(WorldBase):
     def _init_param(self):
         self.g = 9.8
         self.timestep = 1 / 50
@@ -24,22 +24,24 @@ class World(WorldBase):
 class Drone(RobotBase):
     def __init__(self,
                  drone_name: str = "hb",
+                 init_pos: np.ndarray = np.array([2, 2, 2]),
                  enable_gui=True):
         self.urdf_path = f"{ROBOT_ASSETS_PATH}/urdf"
         self.drone_name = drone_name
-        self.init_low = [-3, -3, 1]
-        self.init_high = [3, 3, 3]
+        self._init_pos = init_pos
 
-        world = World(enable_gui=enable_gui)
+        world = DroneWorld(enable_gui=enable_gui)
         super(Drone, self).__init__(world)
         self._init_param()
 
     def reset(self):
-        init_pos = np.random.uniform(self.init_low, self.init_high)
         p.resetBasePositionAndOrientation(self.robot_id,
-                                          init_pos,
+                                          self._init_pos,
                                           p.getQuaternionFromEuler([0, 0, 0]),
                                           self.client_id)
+
+    def set_init_pos(self, init_pos: np.ndarray):
+        self._init_pos = init_pos
 
     def _load_robot(self) -> int:
         robot_id = p.loadURDF(self.urdf_path + f"/{self.drone_name}.urdf",
