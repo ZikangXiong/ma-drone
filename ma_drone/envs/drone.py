@@ -1,14 +1,77 @@
+from abc import abstractmethod, ABC
+from typing import Dict
 from xml.etree import ElementTree
 
 import numpy as np
 import pybullet as p
 import pybullet_data
+from scipy.optimize import nnls
 
 from ma_drone.config import ROBOT_ASSETS_PATH
-from ma_drone.envs.base import WorldBase, RobotBase
+from ma_drone.utils import no_render
+
+
+class WorldBase(ABC):
+    def __init__(self, enable_gui: bool):
+        if enable_gui:
+            self.client_id = p.connect(p.GUI)
+        else:
+            self.client_id = p.connect(p.DIRECT)
+
+        self._init_param()
+
+        with no_render():
+            self._build_world()
+
+        p.setRealTimeSimulation(0, physicsClientId=self.client_id)
+
+    @abstractmethod
+    def _init_param(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _build_world(self):
+        raise NotImplementedError()
+
+
+class RobotBase(ABC):
+    def __init__(self, world: WorldBase):
+        self.world = world
+
+        self.client_id = self.world.client_id
+
+        with no_render():
+            self.robot_id = self._load_robot()
+
+        self._init_param()
+
+    @abstractmethod
+    def _load_robot(self) -> int:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _init_param(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def reset(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def ctrl(self, cmd: np.ndarray):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_obs(self) -> np.ndarray:
+        pass
 
 
 class DroneWorld(WorldBase):
+    def __init__(self, enable_gui: bool = False):
+        super().__init__(enable_gui)
+        self.drones: Dict[str, Drone] = {}
+        self.controllers: Dict[str, DronePID] = {}
+
     def _init_param(self):
         self.g = 9.8
         self.timestep = 1 / 50
@@ -20,17 +83,21 @@ class DroneWorld(WorldBase):
         p.setTimeStep(self.timestep, physicsClientId=self.client_id)
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self.client_id)
 
+    def add_drone(self, drone_pos: np.ndarray, drone_name: str = "hb"):
+        drone_indx = f"drone-{len(self.drones)}"
+        self.drones[drone_indx] = Drone(self, drone_pos, drone_name)
+        self.controllers[drone_indx] = DronePID(self.drones[drone_indx])
+
 
 class Drone(RobotBase):
     def __init__(self,
-                 drone_name: str = "hb",
-                 init_pos: np.ndarray = np.array([2, 2, 2]),
-                 enable_gui=True):
+                 world: DroneWorld,
+                 init_pos: np.ndarray,
+                 drone_name: str = "hb"):
         self.urdf_path = f"{ROBOT_ASSETS_PATH}/urdf"
         self.drone_name = drone_name
         self._init_pos = init_pos
 
-        world = DroneWorld(enable_gui=enable_gui)
         super(Drone, self).__init__(world)
         self._init_param()
 
@@ -45,7 +112,7 @@ class Drone(RobotBase):
 
     def _load_robot(self) -> int:
         robot_id = p.loadURDF(self.urdf_path + f"/{self.drone_name}.urdf",
-                              basePosition=[2, 2, 2],
+                              basePosition=self._init_pos,
                               baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
                               flags=p.URDF_USE_SELF_COLLISION,
                               physicsClientId=self.client_id)
@@ -134,3 +201,136 @@ class Drone(RobotBase):
         vel, rot = p.getBaseVelocity(self.robot_id, self.client_id)
 
         return np.concatenate([pos, ori, vel, rot])
+
+
+class DronePID:
+    """
+    Adapted from
+    https://github.com/utiasDSL/gym-pybullet-drones/blob/master/gym_pybullet_drones/control/SimplePIDControl.py
+    """
+
+    def __init__(self, drone: Drone):
+        self.drone = drone
+
+        # Default PID coefficients
+        self._force_p_coef = np.array([.1, .1, .2])
+        self._force_i_coef = np.array([.0001, .0001, .0001])
+        self._force_d_coef = np.array([.3, .3, .4])
+        self._torque_p_coef = np.array([.3, .3, .05])
+        self._torque_i_coef = np.array([.0001, .0001, .0001])
+        self._torque_d_coef = np.array([.3, .3, .5])
+
+        self.last_pos_e = np.zeros(3)
+        self.integral_pos_e = np.zeros(3)
+        self.last_rpy_e = np.zeros(3)
+        self.integral_rpy_e = np.zeros(3)
+
+        # constrain the max roll and pitch angles for stability
+        self.max_roll_pitch = np.pi / 6
+
+    def reset(self):
+        self.last_pos_e = np.zeros(3)
+        self.integral_pos_e = np.zeros(3)
+        self.last_rpy_e = np.zeros(3)
+        self.integral_rpy_e = np.zeros(3)
+
+    def control(self, goal: np.ndarray) -> np.ndarray:
+        cur_pos, cur_ori = self.drone.get_base_pos_and_ori()
+
+        target_force = self._compute_target_force(goal, cur_pos)
+        target_thrust = self._compute_target_thrust(target_force, cur_ori)
+
+        target_rpy = self._compute_target_rotation(target_force)
+        target_torque = self._compute_target_torque(target_rpy, cur_ori)
+
+        # control commands in rpm
+        rpm = self._compute_rpm(target_thrust, target_torque)
+
+        return rpm
+
+    def _compute_target_force(self, goal: np.ndarray, cur_pos: np.ndarray) -> np.ndarray:
+        pos_e = goal - np.array(cur_pos).reshape(3)
+        d_pos_e = (pos_e - self.last_pos_e) / self.drone.world.timestep
+        self.last_pos_e = pos_e
+        self.integral_pos_e = self.integral_pos_e + pos_e * self.drone.world.timestep
+
+        target_force = (np.array([0, 0, self.drone.m * self.drone.world.g])
+                        + np.multiply(self._force_p_coef, pos_e)
+                        + np.multiply(self._force_i_coef, self.integral_pos_e)
+                        + np.multiply(self._force_d_coef, d_pos_e))
+
+        return target_force
+
+    def _compute_target_thrust(self, target_force: np.ndarray, cur_ori: np.ndarray) -> float:
+        cur_rotation = np.array(p.getMatrixFromQuaternion(cur_ori)).reshape(3, 3)
+        target_thrust = np.dot(cur_rotation, target_force)
+        target_thrust = target_thrust.clip(0, self.drone.max_thrust)
+
+        return target_thrust[2]
+
+    def _compute_target_rotation(self, target_force: np.ndarray) -> np.ndarray:
+        target_rpy = np.zeros(3)
+
+        sign_z = np.sign(target_force[2])
+        if sign_z == 0:
+            sign_z = 1
+
+        target_rpy[0] = np.arcsin(-sign_z * target_force[1] / np.linalg.norm(target_force))
+        target_rpy[0] = np.clip(target_rpy[0], -self.max_roll_pitch, self.max_roll_pitch)
+        target_rpy[1] = np.arctan2(sign_z * target_force[0], sign_z * target_force[2])
+        target_rpy[1] = np.clip(target_rpy[1], -self.max_roll_pitch, self.max_roll_pitch)
+        # Yaw is intended to leave as 0
+
+        return target_rpy
+
+    def _compute_target_torque(self, target_rpy: np.ndarray, cur_ori: np.ndarray) -> np.ndarray:
+        cur_rpy = p.getEulerFromQuaternion(cur_ori)
+        rpy_e = target_rpy - np.array(cur_rpy)
+
+        if rpy_e[2] > np.pi:
+            rpy_e[2] = rpy_e[2] - 2 * np.pi
+        if rpy_e[2] < -np.pi:
+            rpy_e[2] = rpy_e[2] + 2 * np.pi
+        d_rpy_e = (rpy_e - self.last_rpy_e) / self.drone.world.timestep
+        self.last_rpy_e = rpy_e
+        self.integral_rpy_e = self.integral_rpy_e + rpy_e * self.drone.world.timestep
+
+        target_torque = (np.multiply(self._torque_p_coef, rpy_e)
+                         + np.multiply(self._torque_i_coef, self.integral_rpy_e)
+                         + np.multiply(self._torque_d_coef, d_rpy_e))
+
+        max_xy_torque = self.drone.max_xy_torque
+        max_z_torque = self.drone.max_z_torque
+
+        ub = np.array([max_xy_torque, max_xy_torque, max_z_torque])
+        lb = -ub
+        target_torque = target_torque.clip(lb, ub)
+
+        return target_torque
+
+    def _compute_rpm(self, target_thrust: float, target_torque: np.ndarray) -> np.ndarray:
+        x = np.concatenate([[target_thrust], target_torque])
+        bx = self.drone.B * x
+        power_rpm = self.drone.A_inv @ bx
+        power_rpm = power_rpm.clip(0, self.drone.max_rpm ** 2)
+
+        if np.min(power_rpm) < 0:
+            power_rpm, res = nnls(self.drone.A, bx, maxiter=20)
+
+        return np.sqrt(power_rpm)
+
+    def set_force_pid_coef(self,
+                           p_coef: np.ndarray,
+                           i_coef: np.ndarray,
+                           d_coef: np.ndarray):
+        self._force_p_coef = p_coef
+        self._force_i_coef = i_coef
+        self._force_d_coef = d_coef
+
+    def set_torque_pid_coef(self,
+                            p_coef: np.ndarray,
+                            i_coef: np.ndarray,
+                            d_coef: np.ndarray):
+        self._torque_p_coef = p_coef
+        self._torque_i_coef = i_coef
+        self._torque_d_coef = d_coef
