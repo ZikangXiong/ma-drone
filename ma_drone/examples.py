@@ -3,7 +3,9 @@ import time
 import numpy as np
 import pybullet as p
 
+from ma_drone.config import DATA_ROOT
 from ma_drone.envs.drone import DroneWorld
+from ma_drone.nlf.train import DataCollector
 
 
 def fly_one_drone():
@@ -55,7 +57,15 @@ def ctrl_multiple_drones():
         p.stepSimulation(world.client_id)
 
 
+def collect_data():
+    data_collector = DataCollector()
+    data_collector.collect(1_000_000)
+    data_collector.dump(f"{DATA_ROOT}/transitions.npy")
+    # print(data_collector.buffer)
+
+
 if __name__ == '__main__':
     # fly_one_drone()
     # ctrl_one_drone()
-    ctrl_multiple_drones()
+    # ctrl_multiple_drones()
+    collect_data()

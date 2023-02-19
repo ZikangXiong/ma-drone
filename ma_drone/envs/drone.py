@@ -202,6 +202,11 @@ class Drone(RobotBase):
 
         return np.concatenate([pos, ori, vel, rot])
 
+    def get_relative_obs(self, goal: np.ndarray) -> np.ndarray:
+        obs = self.get_obs()
+        obs[:3] = goal - obs[:3]
+        return obs
+
 
 class DronePID:
     """
