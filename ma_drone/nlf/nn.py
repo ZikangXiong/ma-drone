@@ -18,7 +18,7 @@ class NLF(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(len(arch) - 1):
             self.layers.append(nn.Linear(arch[i], arch[i + 1]))
-            self.layers.append(nn.ReLU())
+            self.layers.append(nn.Tanh())
 
     def forward(self, x):
         for layer in self.layers:
@@ -41,8 +41,9 @@ class NLF(nn.Module):
                   batch_size: int,
                   lr: float = 1e-3,
                   upper_cnst: float = 10,
+                  weight_decay: float = 0.01,
                   upper_bound: float = 10.0):
-        optimizer = th.optim.Adam(self.parameters(), lr=lr)
+        optimizer = th.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
 
         data_tensor = th.from_numpy(data).float()
         data_loader = DataLoader(data_tensor, batch_size=batch_size, shuffle=True)

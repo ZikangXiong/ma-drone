@@ -17,8 +17,8 @@ def as_numpy(inpt: Union[th.Tensor, int, float]) -> np.ndarray:
         return np.array(inpt)
 
 
-def default_tensor(x) -> Tensor:
-    return th.as_tensor(x, dtype=DEFAULT_TENSOR_TYPE, device=DEFAULT_DEVICE)
+def default_tensor(x, requires_grad: bool = False) -> Tensor:
+    return th.tensor(x, dtype=DEFAULT_TENSOR_TYPE, device=DEFAULT_DEVICE, requires_grad=requires_grad)
 
 
 JointInfo = namedtuple('JointInfo',

@@ -7,6 +7,8 @@ from ma_drone.config import DATA_ROOT
 from ma_drone.envs.drone import DroneWorld
 from ma_drone.nlf.data import DataCollector
 from ma_drone.nlf.nn import NLF
+from ma_drone.nlf.value_table import ValueTable
+from ma_drone.utils import video_recorder
 
 
 def fly_one_drone():
@@ -49,13 +51,14 @@ def ctrl_multiple_drones():
     drones = world.drones
     controller = world.controllers
 
-    for _ in range(1000):
-        for k in drones.keys():
-            action = controller[k].control(goals[k])
-            drones[k].ctrl(action)
-        time.sleep(0.01)
+    with video_recorder(world.client_id, f"{DATA_ROOT}/ma-video.mp4"):
+        for _ in range(1000):
+            for k in drones.keys():
+                action = controller[k].control(goals[k])
+                drones[k].ctrl(action)
+            time.sleep(0.001)
 
-        p.stepSimulation(world.client_id)
+            p.stepSimulation(world.client_id)
 
 
 def collect_data():
@@ -67,13 +70,28 @@ def collect_data():
 def train_nlf():
     data = np.load(f"{DATA_ROOT}/transitions.npy")
     nlf = NLF()
-    nlf.train_nlf(data, 100, 128)
+    nlf.train_nlf(data, 50, 512)
     nlf.save(f"{DATA_ROOT}/nlf.pth")
+
+
+def compute_value_table():
+    value_table = ValueTable()
+    nlf = NLF.load(f"{DATA_ROOT}/nlf.pth")
+    value_table.precompute_table_with_nlf(nlf, np.arange(1, 3, 0.2), 256)
+    print(value_table.table)
+    value_table.save(f"{DATA_ROOT}/value_table.npy")
+
+
+def load_value_table():
+    value_table = ValueTable.load(f"{DATA_ROOT}/value_table.npy")
+    print(value_table.table)
 
 
 if __name__ == '__main__':
     # fly_one_drone()
     # ctrl_one_drone()
-    # ctrl_multiple_drones()
+    ctrl_multiple_drones()
     # collect_data()
-    train_nlf()
+    # train_nlf()
+    # compute_value_table()
+    # load_value_table()
