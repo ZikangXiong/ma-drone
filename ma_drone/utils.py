@@ -7,12 +7,18 @@ import pybullet as p
 import torch as th
 from torch import Tensor
 
+from ma_drone.config import DEFAULT_TENSOR_TYPE, DEFAULT_DEVICE
+
 
 def as_numpy(inpt: Union[th.Tensor, int, float]) -> np.ndarray:
     if isinstance(inpt, Tensor):
         return inpt.detach().cpu().numpy()
     else:
         return np.array(inpt)
+
+
+def default_tensor(x) -> Tensor:
+    return th.as_tensor(x, dtype=DEFAULT_TENSOR_TYPE, device=DEFAULT_DEVICE)
 
 
 JointInfo = namedtuple('JointInfo',
